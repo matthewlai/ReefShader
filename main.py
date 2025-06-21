@@ -72,7 +72,7 @@ def _dll_extension() -> str:
 class MainWidget(QtWidgets.QWidget):
 
   selected_video_changed = QtCore.Signal(str)
-  request_one_frame = QtCore.Signal(int, int, bool, bool, config_block.ConfigDict)
+  request_one_frame = QtCore.Signal(int, int, bool, bool, bool, config_block.ConfigDict)
   unload_video = QtCore.Signal()
   seek_requested = QtCore.Signal(float)
 
@@ -106,8 +106,8 @@ class MainWidget(QtWidgets.QWidget):
     # more frame requests, because by the time the frame returns, we may want to be somewhere else already. This is mostly
     # for dragging the timeline or config sliders, which would otherwise generate a lot of seek signals, and a lot of
     # unnecessary work for the video processor. Instead, we just store where we want to seek to when the frame request
-    # comes back, and that can be updated multiple times while a frame is pending. Same for if config has been changed (
-    # so we want to request another preview frame).
+    # comes back, and that can be updated multiple times while a frame is pending. Same for if config has been changed 
+    # (so we want to request another preview frame).
     self._frame_request_pending = False
     self._next_seek_to_time = None
     self._config_changed = False
@@ -414,8 +414,8 @@ class MainWidget(QtWidgets.QWidget):
       max_fps = 1.0 / max(decode_time, 0.0001)
       too_slow = max_fps < self._video_info.frame_rate
       self._process_progress_text.setText(
-        f'Preview decode time: {(decode_time * 1000):.2f}ms (<= {max_fps:.1f} FPS) ({frame.width()}x{frame.height()})'
-        f'{"(Slow decode)" if too_slow else ""}')
+        f'Decode/process time: {(decode_time * 1000):.2f}ms ({frame.width()}x{frame.height()})'
+        f'{f" ({max_fps:.1f} FPS, {max_fps / self._video_info.frame_rate:.2}x)" if too_slow else ""}')
 
     self._frame_request_pending = False
     if self._next_seek_to_time is not None:
@@ -452,15 +452,16 @@ class MainWidget(QtWidgets.QWidget):
       slider_value = round((frame_time / self._video_info.duration) * self._video_info.num_frames)
       self._frame_slider.setValue(slider_value)
       self._next_frame_display_time = now + frame_duration
-      self._request_new_frame()
+      self._request_new_frame(streaming_mode=True)
 
-  def _request_new_frame(self, try_reuse_frame=False):
+  def _request_new_frame(self, try_reuse_frame=False, streaming_mode=False):
     self._frame_request_pending = True
     all_configs = config_block.ConfigDict()
     for block in self._config_blocks:
       all_configs[block.name()] = block.to_config_dict()
     process = self._preview_enable_checkbox.isChecked()
-    self.request_one_frame.emit(self._preview_video_widget.width(), self._preview_video_widget.height(), try_reuse_frame, process, all_configs)
+    self.request_one_frame.emit(self._preview_video_widget.width(), self._preview_video_widget.height(),
+                                try_reuse_frame, process, streaming_mode, all_configs)
 
   def _schedule_seek(self, frame_time, start_playing=False):
     if self._frame_request_pending:
@@ -497,7 +498,7 @@ class MainWidget(QtWidgets.QWidget):
         self._request_new_frame()
 
   def _disable_preview(self):
-    blank_frame = np_qt_adapter.array_to_qvideo_frame(np.zeros(shape=(1, 1, 3), dtype=np.uint8))
+    blank_frame = np_qt_adapter.array_to_qvideo_frame(jnp.zeros(shape=(1, 1, 4), dtype=np.uint8))
     self._preview_video_widget.videoSink().setVideoFrame(blank_frame)
     self._frame_slider.setValue(0)
     self._preview_controls_container.setEnabled(False)

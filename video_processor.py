@@ -14,6 +14,7 @@ from PySide6 import QtCore, QtMultimedia
 
 import np_qt_adapter
 import process
+import utils
 
 @dataclasses.dataclass
 class VideoInfo:
@@ -37,10 +38,13 @@ def display_w_h(old_width: int, old_height: int, width: int, height: int, rotati
 
 @functools.partial(jax.jit, static_argnames=['rotation', 'max_val'])
 def convert_to_display(img: jnp.ndarray, rotation: int, max_val: int | float) -> jnp.ndarray:
+  # This function converts an image to the format Qt expects (RGBA8888).
+  if img.shape[2] == 3:
+    img = jnp.pad(img, pad_width=((0, 0), (0, 0), (0, 1)), constant_values=max_val)
   if rotation != 0:
-      assert rotation % 90 == 0
-      times = rotation // 90
-      img = jnp.rot90(img, k=times)
+    assert rotation % 90 == 0
+    times = rotation // 90
+    img = jnp.rot90(img, k=times)
   if max_val == 1.0:
     assert img.dtype == jnp.float32, f'Got {img.dtype}'
     return (img * 255).astype(jnp.uint8)
@@ -90,7 +94,6 @@ failed_hwaccels = set()
 class VideoProcessor(QtCore.QObject):
   # frame data, frame time
   frame_decoded = QtCore.Signal(QtMultimedia.QVideoFrame, float)
-
   eof = QtCore.Signal()
 
   new_video_info = QtCore.Signal(VideoInfo)
@@ -151,7 +154,7 @@ class VideoProcessor(QtCore.QObject):
       self.new_video_info.emit(self._video_info)
 
   @QtCore.Slot()
-  def request_one_frame(self, width, height, try_reuse_frame, do_processing, configs):
+  def request_one_frame(self, width, height, try_reuse_frame, do_processing, streaming_mode, configs):
     try:
       # We may end up processing multiple frames, because gyroflow delays by one frame to avoid waiting for
       # the GPU to CPU sync.
@@ -167,12 +170,11 @@ class VideoProcessor(QtCore.QObject):
           frame, self._carry = process.process_one_frame(frame, self._carry, configs, self._reader.filename())
 
       reader_frame, frame_time, rotation, max_val = frame.data, frame.frame_time, frame.rotation, frame.max_val
-      frame = convert_to_display(reader_frame, rotation=rotation, max_val=max_val)
+      display_frame_data = jax.device_put(convert_to_display(reader_frame, rotation=rotation, max_val=max_val), jax.devices('cpu')[0])
 
       # Convert to QVideoFrame here because we are still in the video processor thread. This avoids blocking
       # the GUI thread while waiting for the GPU sync.
-      #qt_frame = np_qt_adapter.array_to_qvideo_frame(frame, self._video_frame_queues[self._next_video_frame_idx])
-      qt_frame = np_qt_adapter.array_to_qvideo_frame(frame, None)
+      qt_frame = np_qt_adapter.array_to_qvideo_frame(display_frame_data, None)
 
       self.frame_decoded.emit(qt_frame, frame_time)
 
@@ -190,6 +192,7 @@ class VideoProcessor(QtCore.QObject):
   def request_seek_to(self, frame_time):
     if self._reader:
       self._reader.seek(frame_time)
+    self._carry = None
 
   @QtCore.Slot()
   def unload_video(self):

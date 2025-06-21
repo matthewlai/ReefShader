@@ -53,7 +53,7 @@ def process_step1(frame, carry, output_for_gyroflow: bool, rotation: int,
     frame_out = gyroflow.to_gyroflow(frame_out)
   return frame_out, ref, (last_frame_mins, last_frame_maxs)
 
-def process_one_frame(frame: video_reader.Frame, carry, config: ConfigDict, video_path: str) -> tuple[video_reader.Frame, Any] | None:
+def process_one_frame(frame: video_reader.Frame, carry, config: ConfigDict, video_path: str) -> tuple[video_reader.Frame | None, Any]:
     if carry is None:
         carry = {}
 
@@ -75,20 +75,32 @@ def process_one_frame(frame: video_reader.Frame, carry, config: ConfigDict, vide
     using_gyroflow = 'gyroflow' in carry
 
     step1_carry = carry['step1_carry'] if 'step1_carry' in carry else None
-    new_frame_data, ref, step1_carry = process_step1(
+    new_frame_data, next_ref, step1_carry = process_step1(
         frame.data, step1_carry, output_for_gyroflow=using_gyroflow, rotation=frame.rotation,
         colour_norm_enabled=config['colour_norm']['enabled'], max_gain=config['colour_norm']['max_gain'], temporal_smoothing=config['colour_norm']['temporal_smoothing'],
         gamma_enabled=config['gamma']['enabled'], gamma=config['gamma']['gamma'])
 
+    last_frame = carry['last_frame'] if 'last_frame' in carry else None
+    last_frame_data = carry['last_frame_data'] if 'last_frame_data' in carry else None
+    last_ref = carry['last_ref'] if 'last_ref' in carry else None
+
+    carry['last_frame'] = frame
+    carry['last_frame_data'] = new_frame_data
+    carry['last_ref'] = next_ref
     carry['step1_carry'] = step1_carry
 
-    if using_gyroflow:
-        new_frame_data = carry['gyroflow'].process_frame(frame=new_frame_data, frame_time=frame.frame_time, rotation=frame.rotation, delay_one_frame=False)
-        if new_frame_data is None:
-            return None, carry
-        new_frame_data = gyroflow.from_gyroflow(new_frame_data)
+    if last_frame:
+        if using_gyroflow:
+            last_frame_data = carry['gyroflow'].process_frame(frame=last_frame_data, frame_time=last_frame.frame_time,
+                                                              rotation=last_frame.rotation, delay_one_frame=True)
+            if last_frame_data is None:
+                return None, carry
 
-    if config['output']['side_by_side'] and new_frame_data.shape == ref.shape:
-        new_frame_data = utils.MergeSideBySide(new_frame_data, ref)
+            last_frame_data = gyroflow.from_gyroflow(last_frame_data)
 
-    return dataclasses.replace(frame, data=new_frame_data), carry
+        if config['output']['side_by_side'] and last_frame_data.shape == last_ref.shape:
+            last_frame_data = utils.MergeSideBySide(last_frame_data, last_ref)
+
+        return dataclasses.replace(last_frame, data=last_frame_data), carry
+    else:
+        return None, carry
