@@ -2,6 +2,7 @@ import datetime
 import functools
 import platform
 import time
+import traceback
 
 import jax
 from jax import numpy as jnp
@@ -73,6 +74,8 @@ class MainWidget(QtWidgets.QWidget):
 
   selected_video_changed = QtCore.Signal(str)
   request_one_frame = QtCore.Signal(int, int, bool, bool, bool, config_block.ConfigDict)
+  process_video = QtCore.Signal(str, config_block.ConfigDict)
+  stop_processing_video = QtCore.Signal()
   unload_video = QtCore.Signal()
   seek_requested = QtCore.Signal(float)
 
@@ -146,24 +149,25 @@ class MainWidget(QtWidgets.QWidget):
     self._preview_enable_checkbox.setChecked(True)
 
     # Processing status and output folder.
-    output_path_label = QtWidgets.QLabel('Output path (relative to file): ')
+    output_path_label = QtWidgets.QLabel('Output path (relative to input dir or absolute): ')
     self._output_path_field = QtWidgets.QLineEdit(self._settings.value('output_path', 'processed/'))
     self._process_button = QtWidgets.QPushButton('Process Selected')
     self._process_progress_text = QtWidgets.QLabel()
     self._process_progress_text.setFont(_monospace_font())
 
     # Left panel (input files and media info).
-    file_list_controls_layout = QtWidgets.QHBoxLayout()
+    self._file_list_controls = QtWidgets.QWidget(self)
+    file_list_controls_layout = QtWidgets.QHBoxLayout(self._file_list_controls)
     file_list_controls_layout.addWidget(add_files_button)
     file_list_controls_layout.addWidget(add_folder_button)
     file_list_controls_layout.addWidget(self._remove_file_button)
-    input_files_group = QtWidgets.QGroupBox('Input Files')
-    input_files_group_v_layout = QtWidgets.QVBoxLayout(input_files_group)
+    self._input_files_group = QtWidgets.QGroupBox('Input Files')
+    input_files_group_v_layout = QtWidgets.QVBoxLayout(self._input_files_group)
     input_files_group_v_layout.addWidget(self._path_prefix_label)
     input_files_group_v_layout.addWidget(self._file_list)
-    input_files_group_v_layout.addLayout(file_list_controls_layout)
+    input_files_group_v_layout.addWidget(self._file_list_controls)
     left_v_layout = QtWidgets.QVBoxLayout()
-    left_v_layout.addWidget(input_files_group)
+    left_v_layout.addWidget(self._input_files_group)
     media_info_group = QtWidgets.QGroupBox('Media Info')
     media_info_group_layout = QtWidgets.QVBoxLayout(media_info_group)
     self._media_info = QtWidgets.QLabel('')
@@ -209,7 +213,7 @@ class MainWidget(QtWidgets.QWidget):
         display_name='Resolution Scaling',
         checkable=True,
         elements=[
-          config_block.ConfigEnum(key='width', display_name='Width', default_index=0, options=[('1920', 1920), ('1280', 1280)]),
+          config_block.ConfigEnum(key='width', display_name='Width', default_index=0, options=[('Full', -1), ('1920', 1920), ('1280', 1280)]),
           config_block.ConfigBlockDescription(key='', display_name='', text='Height will be automatically set to preserve aspect ratio.')
         ]
       ),
@@ -253,9 +257,7 @@ class MainWidget(QtWidgets.QWidget):
         checkable=False,
         elements=[
           config_block.ConfigEnum(key='codec', display_name='Codec', default_index=0, options=[
-              ('H264', 'h264'),
-              ('HEVC', 'hevc'),
-              ('AV1', 'av1')
+              (codec_name, codec) for codec, codec_name in video_processor.AvailableCodecs()
           ]),
           config_block.ConfigInt(key='bitrate', display_name='Bit Rate (mbps)', default_value=20, min_value=1, max_value=200),
         ]
@@ -288,20 +290,26 @@ class MainWidget(QtWidgets.QWidget):
     # we pass through event loop boundaries.
     self.selected_video_changed.connect(self._video_processor.request_load_video)
     self.request_one_frame.connect(self._video_processor.request_one_frame)
+    self.process_video.connect(self._video_processor.process_video)
+    self.stop_processing_video.connect(self._video_processor.stop_processing_video)
     self.seek_requested.connect(self._video_processor.request_seek_to)
     self.unload_video.connect(self._video_processor.unload_video)
     self._video_processor.frame_decoded.connect(self.frame_received)
     self._video_processor.eof.connect(self.eof_received)
     self._video_processor.new_video_info.connect(self.update_video_info)
+    self._video_processor.video_processing_done.connect(self.maybe_start_new_video_processing)
     self._frame_slider.sliderMoved.connect(self.frame_slider_moved)
     self._frame_slider.sliderPressed.connect(self.frame_slider_pressed)
     self._preview_play_stop_button.clicked.connect(self._play_stop_clicked)
+    self._process_button.clicked.connect(self._process_cancel_clicked)
 
     self._preview_enable_checkbox.checkStateChanged.connect(self.configs_changed)
 
     self._video_processor_thread.start()
 
     self._video_loaded = False
+
+    self._converting = None
 
     self.configs_changed()
     self.video_multi_selection_changed()
@@ -447,12 +455,16 @@ class MainWidget(QtWidgets.QWidget):
     # with the hour field.
     self._video_position_text.setText(_pretty_duration(frame_time, self._video_info.duration))
 
+    slider_value = round((frame_time / self._video_info.duration) * self._video_info.num_frames)
+
     if self._is_playing:
       frame_duration = 1.0 / self._video_info.frame_rate
-      slider_value = round((frame_time / self._video_info.duration) * self._video_info.num_frames)
       self._frame_slider.setValue(slider_value)
       self._next_frame_display_time = now + frame_duration
       self._request_new_frame(streaming_mode=True)
+
+    if self._converting:
+      self._frame_slider.setValue(slider_value)
 
   def _request_new_frame(self, try_reuse_frame=False, streaming_mode=False):
     self._frame_request_pending = True
@@ -486,6 +498,64 @@ class MainWidget(QtWidgets.QWidget):
   @QtCore.Slot()
   def _play_stop_clicked(self):
     self._set_playing(not self._is_playing)
+
+  def _interactive_mode(self):
+    self._process_button.setText('Process Selected')
+    for block in self._config_blocks:
+      block.setEnabled(True)
+    self._file_list_controls.setEnabled(True)
+    self._input_files_group.setEnabled(True)
+    self._output_path_field.setEnabled(True)
+    self._preview_play_stop_button.setEnabled(True)
+    self._frame_slider.setEnabled(True)
+    self._preview_enable_checkbox.setEnabled(True)
+    self.video_multi_selection_changed()
+
+  @QtCore.Slot()
+  def _process_cancel_clicked(self):
+    if self._converting:
+      self._converting = None
+      for item in self._file_list.selectedItems():
+        item.setSelected(False)
+      self._interactive_mode()
+      self.stop_processing_video.emit()
+    else:
+      self._process_button.setText('Cancel Processing')
+      for block in self._config_blocks:
+        block.setEnabled(False)
+      self._file_list_controls.setEnabled(False)
+      self._input_files_group.setEnabled(False)
+      self._output_path_field.setEnabled(False)
+      self._preview_play_stop_button.setEnabled(False)
+      self._frame_slider.setEnabled(False)
+      self._preview_enable_checkbox.setEnabled(False)
+      self._preview_enable_checkbox.setChecked(True)
+      self.maybe_start_new_video_processing(False)
+
+  @QtCore.Slot()
+  def maybe_start_new_video_processing(self, stop_requested):
+    if stop_requested:
+      return
+    if self._converting:
+      current_items = self._file_list.findItems(self._converting, QtCore.Qt.MatchFlag.MatchExactly)
+      assert len(current_items) == 1
+      current_items[0].setSelected(False)
+
+    selected_videos = self._file_list.selectedItems()
+    if not selected_videos:
+      self._interactive_mode()
+      return
+    self._converting = selected_videos[0].text()
+    self.video_single_selection_changed(self._converting)
+    output_dir = self._output_path_field.text()
+    if os.path.isabs(output_dir):
+      output_path = os.path.join(output_dir, self._converting)
+    else:
+      output_path = os.path.join(self._common_prefix, output_dir, self._converting)
+    all_configs = config_block.ConfigDict()
+    for block in self._config_blocks:
+      all_configs[block.name()] = block.to_config_dict()
+    self.process_video.emit(output_path, all_configs)
 
   def _set_playing(self, playing):
     self._is_playing = playing

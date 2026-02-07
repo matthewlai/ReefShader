@@ -4,17 +4,37 @@ import functools
 import gc
 import queue
 import time
+import traceback
 
 import jax
 from jax import numpy as jnp
 import numpy as np
 
-from JaxVidFlow import scale, video_reader
+from JaxVidFlow import scale, video_reader, video_writer
 from PySide6 import QtCore, QtMultimedia
 
 import np_qt_adapter
 import process
 import utils
+
+CODEC_CANDIDATES = {
+  'hevc_videotoolbox': 'HEVC (Apple VideoToolbox)',
+  'hevc_nvenc': 'HEVC (NVIDIA NVENC)',
+  'hevc_vaapi': 'HEVC (VAAPI)',
+  'hevc': 'HEVC (Software)',
+  'h264_videotoolbox': 'H264 (Apple VideoToolbox)',
+  'h264_nvenc': 'H264 (NVIDIA NVENC)',
+  'h264_vaapi': 'H264 (VAAPI)',
+  'h264': 'H264 (Software)',
+}
+
+@functools.cache
+def AvailableCodecs() -> list[str, str]:
+  ret = []
+  for codec, codec_name in CODEC_CANDIDATES.items():
+    if video_writer.VideoWriter.test_codec(codec):
+      ret.append((codec, codec_name))
+  return ret
 
 @dataclasses.dataclass
 class VideoInfo:
@@ -95,6 +115,7 @@ class VideoProcessor(QtCore.QObject):
   # frame data, frame time
   frame_decoded = QtCore.Signal(QtMultimedia.QVideoFrame, float)
   eof = QtCore.Signal()
+  video_processing_done = QtCore.Signal(bool)
 
   new_video_info = QtCore.Signal(VideoInfo)
 
@@ -102,37 +123,49 @@ class VideoProcessor(QtCore.QObject):
     super().__init__()
     self._path = None
     self._reader = None
+    self._writer = None
     self._video_info = None
     self._last_frame = None
     self._carry = None
+    self._video_processing_stop_requested = False
+
+  def _load_video_impl(self, path):
+    print(f'loading {path}')
+    if self._reader:
+      # If we already have a reader, we force it to be deallocated first. Otherwise
+      # if we are doing hardware decoding, we can run out of hardware contexts.
+      self._reader = None
+      gc.collect()
+
+    if self._carry:
+      self._carry = None
+      gc.collect()
+
+    decoder_name = 'Software'
+    for hwaccel, hwaccel_name in guess_hardware_decoders():
+      if hwaccel in failed_hwaccels:
+        continue
+      try:
+        self._reader = video_reader.VideoReader(filename=path, hwaccel=hwaccel)
+        decoder_name = hwaccel_name
+        break
+      except Exception as e:
+        failed_hwaccels.add(hwaccel)
+        print(e)
+        self._reader = None
+
+    if self._reader is None:
+      # Fallback to software decode.
+      self._reader = video_reader.VideoReader(filename=path)
+    print(f'done loading {path}')
+    return decoder_name
 
   @QtCore.Slot()
   def request_load_video(self, path):
     if self._path != path:
       self._path = path
 
-      if self._reader:
-        # If we already have a reader, we force it to be deallocated first. Otherwise
-        # if we are doing hardware decoding, we can run out of hardware contexts.
-        self._reader = None
-        gc.collect()
-
-      decoder_name = 'Software'
-      for hwaccel, hwaccel_name in guess_hardware_decoders():
-        if hwaccel in failed_hwaccels:
-          continue
-        try:
-          self._reader = video_reader.VideoReader(filename=path, hwaccel=hwaccel)
-          decoder_name = hwaccel_name
-          break
-        except Exception as e:
-          failed_hwaccels.add(hwaccel)
-          print(e)
-          self._reader = None
-
-      if self._reader is None:
-        # Fallback to software decode.
-        self._reader = video_reader.VideoReader(filename=path)
+      decoder_name = self._load_video_impl(path)
 
       # Some formats don't record number of frames, so we estimate using duration and frame rate instead
       # (assuming constant frame rate).
@@ -187,6 +220,75 @@ class VideoProcessor(QtCore.QObject):
       self._reader.set_height(h)
     except StopIteration:
       self.eof.emit()
+
+  @QtCore.Slot()
+  def process_video(self, output_path, configs):
+    self._load_video_impl(self._path)
+    if configs['scaling']['width'] != -1:
+      ratio = configs['scaling']['width'] / self._reader.width()
+      new_width = int(ratio * self._reader.width())
+      new_height = int(ratio * self._reader.height())
+      if new_width % 2 == 1:
+        new_width += 1
+      if new_height % 2 == 1:
+        new_height += 1
+      self._reader.set_width(new_width)
+      self._reader.set_height(new_height)
+    if self._writer:
+        # If we already have a writer, we force it to be deallocated first. Otherwise
+        # if we are doing hardware encoding, we can run out of hardware contexts.
+        self._writer = None
+        gc.collect()
+    print(f'Encoding {self._path} => {output_path}')
+    self._writer = video_writer.VideoWriter(
+        filename=output_path,
+        frame_rate=self._video_info.frame_rate,
+        pixfmt='yuv420p',
+        codec_name=configs['encode']['codec'],
+        codec_options={},
+        target_bitrate=configs['encode']['bitrate'] * 1000000)
+    self._video_processing_stop_requested = False
+    self._carry = None
+    self.process_one_frame(configs)
+    
+  @QtCore.Slot()
+  def process_one_frame(self, configs):
+    stopping = False
+    if self._video_processing_stop_requested:
+      stopping = True
+    else:
+      try:
+        # We may end up processing multiple frames, because gyroflow delays by one frame to avoid waiting for
+        # the GPU to CPU sync.
+        frame = None
+        while frame is None:
+          frame = next(self._reader)
+          frame, self._carry = process.process_one_frame(frame, self._carry, configs, self._reader.filename())
+
+        reader_frame, frame_time, rotation, max_val = frame.data, frame.frame_time, frame.rotation, frame.max_val
+        display_frame_data = jax.device_put(convert_to_display(reader_frame, rotation=rotation, max_val=max_val), jax.devices('cpu')[0])
+
+        # Convert to QVideoFrame here because we are still in the video processor thread. This avoids blocking
+        # the GUI thread while waiting for the GPU sync.
+        qt_frame = np_qt_adapter.array_to_qvideo_frame(display_frame_data, None)
+
+        self.frame_decoded.emit(qt_frame, frame_time)
+        self._writer.add_frame(frame=reader_frame)
+        self._writer.write_audio_packets(audio_packets=self._reader.audio_packets(),
+                                         in_audio_stream=self._reader.audio_stream())
+        # Schedule another frame decode using singleShot() so that it's possible to interrupt processing.
+        QtCore.QTimer.singleShot(1, lambda: self.process_one_frame(configs))
+      except StopIteration:
+        stopping = True
+
+    if stopping:
+      self._writer.close()
+      self._writer = None
+      gc.collect()
+      self.video_processing_done.emit(self._video_processing_stop_requested)
+
+  def stop_processing_video(self):
+    self._video_processing_stop_requested = True
 
   @QtCore.Slot()
   def request_seek_to(self, frame_time):
