@@ -23,9 +23,9 @@ struct Cli {
     #[arg(long)]
     width: Option<u32>,
 
-    /// Disable automatic colour normalisation
-    #[arg(long)]
-    no_colour_norm: bool,
+    /// Enable automatic colour normalisation
+    #[arg(long, default_value_t = true, num_args = 0..=1, default_missing_value = "true")]
+    colour_norm: bool,
 
     /// Maximum per-channel normalisation gain
     #[arg(long, default_value_t = 10.0)]
@@ -35,28 +35,28 @@ struct Cli {
     #[arg(long, default_value_t = 0.95)]
     temporal_smoothing: f32,
 
-    /// Disable gamma correction
-    #[arg(long)]
-    no_gamma: bool,
+    /// Enable gamma correction
+    #[arg(long, default_value_t = true, num_args = 0..=1, default_missing_value = "true")]
+    enable_gamma: bool,
 
     /// Gamma exponent
     #[arg(long, default_value_t = 1.1)]
     gamma: f32,
 
-    /// Disable Gyroflow stabilisation
-    #[arg(long)]
-    no_gyroflow: bool,
+    /// Enable Gyroflow stabilisation
+    #[arg(long, default_value_t = true, num_args = 0..=1, default_missing_value = "true")]
+    gyroflow: bool,
 
-    /// Disable underwater index-of-refraction compensation (uses 1.0 instead of --refraction)
-    #[arg(long)]
-    no_underwater: bool,
+    /// Enable underwater index-of-refraction compensation
+    #[arg(long, default_value_t = true, num_args = 0..=1, default_missing_value = "true")]
+    underwater: bool,
 
     /// Water index of refraction for underwater lens correction
     #[arg(long, default_value_t = 1.33)]
     refraction: f64,
 
     /// Render processed and original video side by side
-    #[arg(long)]
+    #[arg(long, default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     side_by_side: bool,
 
     /// Output video encoder name (e.g. hevc_videotoolbox, libx265, libx264)
@@ -68,7 +68,7 @@ struct Cli {
     bitrate: u32,
 
     /// Force CPU colour processing instead of wgpu GPU compute
-    #[arg(long)]
+    #[arg(long, default_value_t = false, num_args = 0..=1, default_missing_value = "true")]
     cpu: bool,
 }
 
@@ -83,13 +83,13 @@ fn main() -> Result<()> {
         config.scaling.enabled = true;
         config.scaling.width = Some(width);
     }
-    config.colour_norm.enabled = !cli.no_colour_norm;
+    config.colour_norm.enabled = cli.colour_norm;
     config.colour_norm.max_gain = cli.max_gain;
     config.colour_norm.temporal_smoothing = cli.temporal_smoothing;
-    config.gamma.enabled = !cli.no_gamma;
+    config.gamma.enabled = cli.enable_gamma;
     config.gamma.gamma = cli.gamma;
-    config.gyroflow.enabled = !cli.no_gyroflow;
-    config.gyroflow.underwater = !cli.no_underwater;
+    config.gyroflow.enabled = cli.gyroflow;
+    config.gyroflow.underwater = cli.underwater;
     config.gyroflow.light_refraction_coefficient = cli.refraction;
     config.output.side_by_side = cli.side_by_side;
     config.encode.codec = cli.codec;
@@ -108,4 +108,44 @@ fn main() -> Result<()> {
         summary.elapsed_secs
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn positive_flags_have_expected_defaults() {
+        let cli = Cli::try_parse_from(["reefshader", "-i", "in.mp4", "-o", "out.mp4"]).unwrap();
+        assert!(cli.colour_norm);
+        assert!(cli.enable_gamma);
+        assert!(cli.gyroflow);
+        assert!(cli.underwater);
+        assert!(!cli.side_by_side);
+        assert!(!cli.cpu);
+    }
+
+    #[test]
+    fn positive_flags_can_be_toggled_explicitly() {
+        let cli = Cli::try_parse_from([
+            "reefshader",
+            "-i",
+            "in.mp4",
+            "-o",
+            "out.mp4",
+            "--colour-norm=false",
+            "--enable-gamma=false",
+            "--gyroflow=false",
+            "--underwater=false",
+            "--side-by-side",
+            "--cpu=true",
+        ])
+        .unwrap();
+        assert!(!cli.colour_norm);
+        assert!(!cli.enable_gamma);
+        assert!(!cli.gyroflow);
+        assert!(!cli.underwater);
+        assert!(cli.side_by_side);
+        assert!(cli.cpu);
+    }
 }
