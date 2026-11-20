@@ -1,0 +1,21 @@
+[package]
+name = "reefshader-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[[bin]]
+name = "reefshader"
+path = "src/main.rs"
+
+[features]
+default = ["ffmpeg"]
+ffmpeg = ["reefshader-core/ffmpeg"]
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+env_logger.workspace = true
+log.workspace = true
+reefshader-core = { path = "../reefshader-core", default-features = false }

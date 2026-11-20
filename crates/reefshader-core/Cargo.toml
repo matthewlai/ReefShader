@@ -1,0 +1,22 @@
+[package]
+name = "reefshader-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["ffmpeg"]
+ffmpeg = ["dep:ffmpeg-next"]
+bundle-lens-profiles = ["gyroflow-core/bundle-lens-profiles"]
+
+[dependencies]
+bytemuck.workspace = true
+ffmpeg-next = { workspace = true, optional = true }
+gyroflow-core.workspace = true
+log.workspace = true
+pollster.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+wgpu.workspace = true

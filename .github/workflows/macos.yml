@@ -1,0 +1,46 @@
+name: macOS Build
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-macos:
+    name: Build (macOS)
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install FFmpeg and pkg-config
+        run: |
+          brew update
+          brew install ffmpeg pkg-config
+          BREW_PREFIX="$(brew --prefix)"
+          echo "PKG_CONFIG_PATH=${BREW_PREFIX}/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "LIBRARY_PATH=${BREW_PREFIX}/lib" >> "$GITHUB_ENV"
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo dependencies
+        uses: Swatinem/rust-cache@v2
+
+      - name: Check workspace
+        run: cargo check --workspace --all-targets
+
+      - name: Run tests
+        run: cargo test --workspace
+
+      - name: Build release CLI binary
+        run: cargo build --release --bin reefshader
+
+      - name: Upload macOS binary artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: reefshader-macos
+          path: target/release/reefshader
