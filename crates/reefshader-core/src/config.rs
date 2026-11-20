@@ -8,6 +8,7 @@ pub struct ProcessingConfig {
     pub gyroflow: GyroflowConfig,
     pub output: OutputConfig,
     pub encode: EncodeConfig,
+    pub force_cpu: bool,
 }
 
 impl Default for ProcessingConfig {
@@ -19,6 +20,7 @@ impl Default for ProcessingConfig {
             gyroflow: GyroflowConfig::default(),
             output: OutputConfig::default(),
             encode: EncodeConfig::default(),
+            force_cpu: false,
         }
     }
 }
@@ -58,6 +60,7 @@ impl Default for GammaConfig {
 pub struct ColourNormConfig {
     pub enabled: bool,
     pub max_gain: f32,
+    /// EMA smoothing factor in [0.0, 1.0): 0.0 = no smoothing, 0.95 = strong smoothing.
     pub temporal_smoothing: f32,
     pub downsample_win: u32,
     pub quantile_low: f32,
@@ -106,24 +109,18 @@ pub struct OutputConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EncodeConfig {
-    pub codec: String,
+    /// Optional explicit FFmpeg encoder name (e.g. `hevc_videotoolbox`, `libx265`, `libx264`).
+    /// When `None`, ReefShader picks the best available encoder for the platform.
+    pub codec: Option<String>,
     pub bitrate_mbps: u32,
 }
 
 impl Default for EncodeConfig {
     fn default() -> Self {
         Self {
-            codec: default_codec().to_string(),
+            codec: None,
             bitrate_mbps: 20,
         }
-    }
-}
-
-fn default_codec() -> &'static str {
-    if cfg!(target_os = "macos") {
-        "hevc_videotoolbox"
-    } else {
-        "libx265"
     }
 }
 
@@ -140,5 +137,6 @@ mod tests {
         assert!(cfg.gyroflow.underwater);
         assert!((cfg.gyroflow.light_refraction_coefficient - 1.33).abs() < 1e-6);
         assert_eq!(cfg.encode.bitrate_mbps, 20);
+        assert!(cfg.encode.codec.is_none());
     }
 }

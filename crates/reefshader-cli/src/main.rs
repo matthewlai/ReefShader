@@ -31,7 +31,7 @@ struct Cli {
     #[arg(long, default_value_t = 10.0)]
     max_gain: f32,
 
-    /// Temporal smoothing factor in [0.0, 1.0]
+    /// Temporal smoothing factor in [0.0, 1.0)
     #[arg(long, default_value_t = 0.95)]
     temporal_smoothing: f32,
 
@@ -59,13 +59,17 @@ struct Cli {
     #[arg(long)]
     side_by_side: bool,
 
-    /// Output video encoder name (e.g. hevc_videotoolbox, libx265, h264_videotoolbox)
+    /// Output video encoder name (e.g. hevc_videotoolbox, libx265, libx264)
     #[arg(long)]
     codec: Option<String>,
 
     /// Target output bitrate in Mbps
     #[arg(long, default_value_t = 20)]
     bitrate: u32,
+
+    /// Force CPU colour processing instead of wgpu GPU compute
+    #[arg(long)]
+    cpu: bool,
 }
 
 fn main() -> Result<()> {
@@ -88,11 +92,20 @@ fn main() -> Result<()> {
     config.gyroflow.underwater = !cli.no_underwater;
     config.gyroflow.light_refraction_coefficient = cli.refraction;
     config.output.side_by_side = cli.side_by_side;
-    if let Some(codec) = cli.codec {
-        config.encode.codec = codec;
-    }
+    config.encode.codec = cli.codec;
     config.encode.bitrate_mbps = cli.bitrate;
+    config.force_cpu = cli.cpu;
 
-    reefshader_core::process_video(&cli.input, &cli.output, &config)?;
+    let summary = reefshader_core::process_video(&cli.input, &cli.output, &config)?;
+    println!(
+        "Done: {} frames ({}x{}) via {} [{}] -> {} ({:.2}s)",
+        summary.frames_processed,
+        summary.width,
+        summary.height,
+        summary.encoder_name,
+        summary.colour_backend.name(),
+        cli.output.display(),
+        summary.elapsed_secs
+    );
     Ok(())
 }
